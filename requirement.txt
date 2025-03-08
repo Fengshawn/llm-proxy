@@ -1,0 +1,4 @@
+sanic
+httpx
+openai
+python-dotenv

@@ -1,29 +1,30 @@
 from sanic import Sanic, json, Request
 from sanic.response import text
 from sanic.exceptions import SanicException
-import httpx
+from openai import AsyncOpenAI
 import os
 
 # 初始化 Sanic 应用
-app = Sanic("DeepSeekService")
+app = Sanic("DeepSeekAsyncService")
 
-# 从环境变量获取 DeepSeek API 密钥（需提前配置）
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "your-api-key")
-DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"  # 假设的 API 地址
-
-# 定义请求超时时间（秒）
-TIMEOUT = 30
+# 配置 DeepSeek 客户端
+client = AsyncOpenAI(
+    api_key=os.getenv("DEEPSEEK_API_KEY", "your-api-key"),
+    base_url="https://api.deepseek.com"
+)
 
 @app.post("/v1/chat/completions")
-async def deepseek_chat(request: Request):
+async def chat_completions(request: Request):
     """
-    调用 DeepSeek 的对话接口
-    请求体格式示例:
+    异步调用 DeepSeek 的对话接口
+    请求体格式与官方一致：
     {
+        "model": "deepseek-chat",
         "messages": [
-            {"role": "user", "content": "你好"}
+            {"role": "system", "content": "You are a helpful assistant"},
+            {"role": "user", "content": "Hello"}
         ],
-        "model": "deepseek-chat"
+        "stream": false
     }
     """
     try:
@@ -31,45 +32,54 @@ async def deepseek_chat(request: Request):
         if not request.json:
             raise SanicException("Invalid JSON body", status_code=400)
 
-        # 提取参数
-        data = request.json
-        messages = data.get("messages", [])
-        model = data.get("model", "deepseek-chat")
+        # 提取参数（保持与官方 SDK 相同的参数结构）
+        params = request.json
+        required_params = ["model", "messages"]
+        if any(param not in params for param in required_params):
+            raise SanicException("Missing required parameters", status_code=400)
 
-        # 构造 DeepSeek 请求头
-        headers = {
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            "Content-Type": "application/json"
-        }
+        # 异步调用 DeepSeek API
+        response = await client.chat.completions.create(
+            model=params["model"],
+            messages=params["messages"],
+            stream=params.get("stream", False),
+            temperature=params.get("temperature", 0.7),
+            max_tokens=params.get("max_tokens", 512)
+        )
 
-        # 构造请求体
-        payload = {
-            "messages": messages,
-            "model": model,
-            "temperature": 0.7,
-            "max_tokens": 500
-        }
-
-        # 异步发送请求到 DeepSeek
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-            response = await client.post(
-                DEEPSEEK_API_URL,
-                headers=headers,
-                json=payload
-            )
-            response.raise_for_status()  # 自动处理 4xx/5xx 错误
-            return json(response.json())
-
-    except httpx.HTTPStatusError as e:
+        # 构建与官方一致的响应格式
         return json({
-            "error": f"DeepSeek API error: {e.response.text}",
-            "status_code": e.response.status_code
-        }, status=e.response.status_code)
-    
+            "id": response.id,
+            "object": response.object,
+            "created": response.created,
+            "choices": [{
+                "index": choice.index,
+                "message": {
+                    "role": choice.message.role,
+                    "content": choice.message.content
+                },
+                "finish_reason": choice.finish_reason
+            } for choice in response.choices],
+            "usage": {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens
+            }
+        })
+
     except Exception as e:
+        # 错误处理保持与官方响应格式一致
+        error_msg = str(e)
+        status_code = 500
+        if hasattr(e, 'status_code'):
+            status_code = e.status_code
         return json({
-            "error": f"Internal server error: {str(e)}"
-        }, status=500)
+            "error": {
+                "message": error_msg,
+                "type": "api_error",
+                "code": status_code
+            }
+        }, status=status_code)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, access_log=True)
+    app.run(host="0.0.0.0", port=8000, access_log=True, auto_reload=True)

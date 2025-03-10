@@ -1,7 +1,8 @@
 from sanic import Sanic, json, Request
-from sanic.response import text
+from sanic.response import text, HTTPResponse
 from sanic.exceptions import SanicException
 from openai import AsyncOpenAI
+import asyncio
 import os
 
 # 初始化 Sanic 应用
@@ -13,7 +14,19 @@ client = AsyncOpenAI(
     base_url="https://api.deepseek.com"
 )
 
-@app.post("/v1/chat/completions")
+
+@app.get("/health")
+async def health(request: Request):
+    return json({
+               "error": 
+                   {
+                       "message": "Service is ok~",
+                        "type": "health_check",
+                        "code": 200
+                   }
+               })
+
+@app.post("/llm/chat/completions")
 async def chat_completions(request: Request):
     """
     异步调用 DeepSeek 的对话接口
@@ -37,35 +50,56 @@ async def chat_completions(request: Request):
         required_params = ["model", "messages"]
         if any(param not in params for param in required_params):
             raise SanicException("Missing required parameters", status_code=400)
-
+        
+        stream_enabled = params.get("stream", False)
+        if stream_enabled is False:
         # 异步调用 DeepSeek API
-        response = await client.chat.completions.create(
-            model=params["model"],
-            messages=params["messages"],
-            stream=params.get("stream", False),
-            temperature=params.get("temperature", 0.7),
-            max_tokens=params.get("max_tokens", 512)
-        )
+            response = await client.chat.completions.create(
+                model=params["model"],
+                messages=params["messages"],
+                stream=stream_enabled, # False
+                temperature=params.get("temperature", 0.7),
+                max_tokens=params.get("max_tokens", 512)
+            )
 
-        # 构建与官方一致的响应格式
-        return json({
-            "id": response.id,
-            "object": response.object,
-            "created": response.created,
-            "choices": [{
-                "index": choice.index,
-                "message": {
-                    "role": choice.message.role,
-                    "content": choice.message.content
-                },
-                "finish_reason": choice.finish_reason
-            } for choice in response.choices],
-            "usage": {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens
-            }
-        })
+            # 构建与官方一致的响应格式
+            return json({
+                "id": response.id,
+                "object": response.object,
+                "created": response.created,
+                "choices": [{
+                    "index": choice.index,
+                    "message": {
+                        "role": choice.message.role,
+                        "content": choice.message.content
+                    },
+                    "finish_reason": choice.finish_reason
+                } for choice in response.choices],
+                "usage": {
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens,
+                    "total_tokens": response.usage.total_tokens
+                }
+            })
+        else:
+            response = await request.respond(content_type="text/plain")
+            stream_response = await client.chat.completions.create(
+                model=params["model"],
+                messages=params["messages"],
+                stream=stream_enabled, # True
+                temperature=params.get("temperature", 0.7),
+                max_tokens=params.get("max_tokens", 512)
+            )
+            async for chunk in stream_response:
+            # 解析 JSON 数据
+                if chunk.choices:  # 确保 choices 字段存在
+                    content = chunk.choices[0].delta.content
+                    print(type(content))
+                    if content:
+                        await response.send(content)  # 逐块写入响应
+            await response.send("Stream completed.")
+            await response.eof()
+            return response
 
     except Exception as e:
         # 错误处理保持与官方响应格式一致
